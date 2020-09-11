@@ -1,0 +1,99 @@
+name: Use network components
+
+on:
+
+  workflow_dispatch:
+    inputs:
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-network.yml' 
+  
+env:
+  AWS_PAGER: ''
+  
+jobs:
+  use-network-components:
+    name: Use AWS network components
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+        
+    - name: Describe existing VPCs
+      run: |-
+        aws ec2 describe-vpcs
+
+    - name: Create and delete network components
+      run: |-
+        export VPC_ID=$(aws ec2 create-vpc --cidr-block '10.0.0.0/16' --query "Vpc.VpcId" --output text)
+        echo "vpc: $VPC_ID"
+        aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
+        aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support
+
+        export SUBNET1_ID=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block '10.0.1.0/24' \
+          --availability-zone "${AWS_REGION}b" \
+          --query "Subnet.SubnetId" --output text)
+        echo "subnet1: $SUBNET1_ID"
+  
+        export SUBNET2_ID=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block '10.0.2.0/24' \
+          --availability-zone "${AWS_REGION}c" \
+          --query "Subnet.SubnetId" --output text)
+        echo "subnet2: $SUBNET2_ID"
+
+        export GATEWAY_ID=$(aws ec2 create-internet-gateway --query "InternetGateway.InternetGatewayId" \
+          --output text)
+        echo "gateway: $GATEWAY_ID"
+        aws ec2 attach-internet-gateway --vpc-id "$VPC_ID" --internet-gateway-id "$GATEWAY_ID"
+
+        export ROUTETABLE_ID=$(aws ec2 create-route-table --vpc-id "$VPC_ID" \
+          --query "RouteTable.RouteTableId" --output text)
+        aws ec2 create-route --route-table-id "$ROUTETABLE_ID" --destination-cidr-block '0.0.0.0/0' \
+          --gateway-id "$GATEWAY_ID"
+        echo "gateway: $ROUTETABLE_ID" 
+        aws ec2 associate-route-table  --subnet-id "$SUBNET1_ID" --route-table-id "$ROUTETABLE_ID"
+
+        export SECURITYGROUP_ID=$(aws ec2 describe-security-groups \
+          --filters Name=vpc-id,Values="$VPC_ID" \
+          --query "SecurityGroups[0].GroupId" --output text)
+        echo "security group: $SECURITYGROUP_ID" 
+        aws ec2 authorize-security-group-ingress --group-id "$SECURITYGROUP_ID" \
+          --protocol tcp --port '80' --cidr '0.0.0.0/0'
+  
+        echo "describe vpc: "
+        aws ec2 describe-vpcs --vpc-ids "$VPC_ID"
+ 
+        echo "delete subnets:"
+        aws ec2 delete-subnet --subnet-id "$SUBNET1_ID"
+        aws ec2 delete-subnet --subnet-id "$SUBNET2_ID"
+
+        echo "delete route table:"
+        aws ec2 delete-route-table --route-table-id "$ROUTETABLE_ID"
+
+        echo "delete gateway:"
+        aws ec2 detach-internet-gateway --internet-gateway-id "$GATEWAY_ID" --vpc-id "$VPC_ID"
+        aws ec2 delete-internet-gateway --internet-gateway-id "$GATEWAY_ID"
+
+        echo "delete vpc:"
+        aws ec2 delete-vpc --vpc-id "$VPC_ID"
+        

@@ -1,0 +1,80 @@
+name: Use log services
+
+on:
+
+  workflow_dispatch:
+    inputs:
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-log.yml' 
+    
+env:
+  LOG_GROUP: test-log-group
+  LOG_STREAM: test-log-stream
+  LOG_MESSAGE: test-log-message
+
+jobs:
+  use-S3:
+    name: Use log services
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+        
+    - name: Cleanup if needed
+      run: |-
+        aws logs delete-log-group --log-group-name "$LOG_GROUP" || true
+        
+    - name: Create log group
+      run: |-
+        aws logs create-log-group --log-group-name "$LOG_GROUP"
+        
+    - name: Create log stream
+      run: |-
+        aws logs create-log-stream --log-group-name "$LOG_GROUP" --log-stream-name "$LOG_STREAM-$GITHUB_SHA"
+        
+    - name: Describe existing log groups
+      run: |-
+        aws logs describe-log-groups
+        
+    - name: Add event to log group
+      run: |-
+        export TIMESTAMP=$(($(date --utc +%s%N)/1000000))
+        echo "timestamp: $TIMESTAMP"
+        export PUT_LOG_EVENTS=$(aws logs put-log-events --log-group-name "$LOG_GROUP" --log-stream-name "$LOG_STREAM-$GITHUB_SHA" --log-events timestamp="$TIMESTAMP",message="$LOG_MESSAGE-$GITHUB_SHA")
+        echo "put log events: $PUT_LOG_EVENTS"
+        grep "nextSequenceToken" <<< "$PUT_LOG_EVENTS"
+        
+    - name: Read event from log group
+      run: |-
+        export LOGS=""
+        while [[ ! $LOGS == *"$GITHUB_SHA"* ]]
+        do
+          export LOGS=$(aws logs get-log-events --log-group-name "$LOG_GROUP" --log-stream-name "$LOG_STREAM-$GITHUB_SHA")
+        done
+        echo -e "logs: \n$LOGS"
+          
+    - name: Delete log group
+      run: |-
+        aws logs delete-log-group --log-group-name "$LOG_GROUP"

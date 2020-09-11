@@ -1,0 +1,13 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  version: "1.17"
+  name: <<EKS_CLUSTER>>
+  region: <<AWS_REGION>>
+  
+managedNodeGroups:
+  - name: <<EKS_NODES>>
+    instanceType: t2.medium
+    desiredCapacity: 3
+    volumeSize: 80

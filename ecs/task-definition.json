@@ -1,0 +1,22 @@
+{
+  "family": "test-service-family",
+  "networkMode": "awsvpc",
+  "executionRoleArn": "<<ROLE_ARN>>",
+  "containerDefinitions": [
+    {
+      "name": "test-service-family",
+      "image": "tutum/hello-world",
+      "portMappings": [
+    {
+      "containerPort": 80,
+      "hostPort": 80,
+      "protocol": "tcp"
+    }
+      ],
+      "essential": true
+    }
+  ],
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512"
+}

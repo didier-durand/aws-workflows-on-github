@@ -1,0 +1,97 @@
+name: Use IAM features
+
+on:
+
+  workflow_dispatch:
+    inputs:
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-iam.yml' 
+
+env:
+  AWS_PAGER: ''
+  IAM_ROLE: iam-test-role
+  IAM_POLICY: EC2InstanceConnect
+  
+jobs:
+  use-iam-featues:
+    name: Use IAM features
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        #not all regions provide pricing
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+
+    - name: Create and delete role with attached policy
+      run: |-
+        echo "cleanup: "
+        export QUERIED_ARN=$(aws iam list-attached-role-policies --role-name $IAM_ROLE \
+          --query 'AttachedPolicies[?PolicyName==`'"$IAM_POLICY"'`].PolicyArn' \
+          --output text)
+        echo "queried policy arn: $QUERIED_ARN"
+        if [[ $QUERIED_ARN == 'arn:aws:iam'* ]]
+          then
+            echo "detach policy: "
+            aws iam detach-role-policy --role-name "$IAM_ROLE" --policy-arn "$QUERIED_ARN"
+          fi
+        aws iam delete-role --role-name "$IAM_ROLE"  >/dev/null 2>&1 || true 
+
+        echo "create role: "
+        export ROLE_ARN=$(aws iam create-role --role-name "$IAM_ROLE" \
+          --assume-role-policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":[\"ecs-tasks.amazonaws.com\"]},\"Action\":[\"sts:AssumeRole\"]}]}" \
+          --query "Role.Arn" --output text)
+        echo "role arn: $ROLE_ARN"
+
+        export POLICY_ARN=$(aws iam list-policies \
+          --query 'Policies[?PolicyName==`'"$IAM_POLICY"'`].{ARN:Arn}' \
+          --output text)
+        echo "policy arn: $POLICY_ARN"
+
+        echo "attach policy to role: "
+        aws iam attach-role-policy --role-name "$IAM_ROLE" --policy-arn "$POLICY_ARN"
+
+        # .... use role with attached policies
+
+        echo "get role with policies:"
+        aws iam get-role --role-name $IAM_ROLE
+        aws iam list-attached-role-policies --role-name $IAM_ROLE
+
+        echo "querying policy arn:"
+        export POLICY_ARN2=$(aws iam list-attached-role-policies --role-name $IAM_ROLE \
+          --query 'AttachedPolicies[?PolicyName==`'"$IAM_POLICY"'`].PolicyArn' \
+          --output text)
+        echo "queried policy arn: $POLICY_ARN2"
+
+        echo "detach policy: "
+        aws iam detach-role-policy --role-name "$IAM_ROLE" --policy-arn "$POLICY_ARN"
+
+        echo "delete role: "
+        aws iam delete-role --role-name "$IAM_ROLE"
+            
+      
+    - name: List all AWS policies
+      run: |-
+        aws iam list-policies
+        
+        

@@ -1,0 +1,79 @@
+name: Push to ECR 
+
+on:
+
+  workflow_dispatch:
+    inputs:
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-ecr.yml' 
+    
+env:
+  ECR_REPOSITORY: test-ecr-repository
+  ECR_DOCKERFILE: Dockerfile.ecr 
+
+jobs:
+  use-ECR:
+    name: Use ECR
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+        
+        
+    - name: Login to AWS ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+      
+    - name: Create ECR repository
+      run: |-
+        aws ecr delete-repository --force --repository-name $ECR_REPOSITORY || true
+        aws ecr create-repository --repository-name $ECR_REPOSITORY
+        
+    - name: Describe ECR repositories
+      run: |-
+        export DESCRIBE_REPOS=$(aws ecr describe-repositories) 
+        echo "describe-repositories: $DESCRIBE_REPOS"
+        #check if repo was created
+        grep "\"repositoryName\": \"$ECR_REPOSITORY\"" <<< $DESCRIBE_REPOS
+    
+    - name: Build, tag, and push image to AWS ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker build --file $ECR_DOCKERFILE -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        
+    - name: Describe ECR images
+      run: |-
+        export DESCRIBE_IMAGES=$(aws ecr describe-images --repository-name $ECR_REPOSITORY)
+        echo "describe-images: $DESCRIBE_IMAGES"
+        #check if image was pushed
+        grep "$IMAGE_TAG" <<< $DESCRIBE_IMAGES
+        
+    - name: Delete ECR repository
+      run: |-
+        aws ecr delete-repository --force --repository-name $ECR_REPOSITORY

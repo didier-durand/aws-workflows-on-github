@@ -1,0 +1,202 @@
+#source: https://medium.com/boltops/gentle-introduction-to-how-aws-ecs-works-with-example-tutorial-cea3d27ce63d
+name: Deploy to ECS 
+
+on:
+
+  workflow_dispatch:
+    inputs:
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-ecs.yml' 
+    
+env: 
+  AWS_PAGER: ''
+  ECS_CLUSTER: 'test-ecs-cluster'
+  TASK_DEFINITION: 'task-definition.json'
+  ECS_SERVICE: 'test-ecs-service'
+  ECS_SERVICE_FAMILY: 'test-service-family'
+  ECS_ROLE: 'ecs-task-execution-role'
+  ECS_POLICY: 'AmazonECSTaskExecutionRolePolicy'
+
+jobs:
+  deploy-to-ECS:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+        
+    - name: Login to AWS
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+      
+    - name: Create, validate and delete ECS cluster & service
+      run: |-
+        echo "task definitions initial cleanup:"
+        aws ecs list-task-definitions
+        for TASK_DEF in $(aws ecs list-task-definitions --query "taskDefinitionArns[]" --output text)
+        do
+          echo "deregister task definition: |$TASK_DEF|"
+          aws ecs deregister-task-definition --task-definition "$TASK_DEF"
+        done
+
+        echo "iam cleanup:"
+        export QUERIED_ARN=$(aws iam list-attached-role-policies --role-name $ECS_ROLE \
+          --query 'AttachedPolicies[?PolicyName==`'"$ECS_POLICY"'`].PolicyArn' \
+          --output text)
+        echo "queried policy arn: $QUERIED_ARN"
+        if [[ $QUERIED_ARN == 'arn:aws:iam'* ]]
+        then
+          echo "detach policy:"
+          aws iam detach-role-policy --role-name "$ECS_ROLE" --policy-arn "$QUERIED_ARN"
+        fi
+        aws iam delete-role --role-name "$ECS_ROLE" || true 
+        
+        echo "cluster & service cleanup:"
+        aws ecs delete-service --service "$ECS_SERVICE" --cluster "$ECS_CLUSTER" --force || true
+        aws ecs delete-cluster --cluster "$ECS_CLUSTER" || true
+
+        echo "create role:"
+        export ROLE_ARN=$(aws iam create-role --role-name "$ECS_ROLE" \
+          --assume-role-policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":[\"ecs-tasks.amazonaws.com\"]},\"Action\":[\"sts:AssumeRole\"]}]}" \
+          --query "Role.Arn" --output text)
+        echo "role arn: $ROLE_ARN"
+
+        export POLICY_ARN=$(aws iam list-policies \
+          --query 'Policies[?PolicyName==`'"$ECS_POLICY"'`].{ARN:Arn}' \
+          --output text)
+        echo "policy arn: $POLICY_ARN"
+        aws iam attach-role-policy --role-name "$ECS_ROLE" --policy-arn "$POLICY_ARN"
+
+        cp -v "ecs/$TASK_DEFINITION" "./$TASK_DEFINITION"
+        sed -i "s|<<ROLE_ARN>>|$ROLE_ARN|" "./$TASK_DEFINITION"
+        echo "task definition:"
+        cat "./$TASK_DEFINITION"
+        export TASK_REVISION=$(aws ecs register-task-definition --cli-input-json "file://$TASK_DEFINITION" \
+          --query "taskDefinition.revision" --output text)
+        echo "task revision: $TASK_REVISION"
+        rm "./$TASK_DEFINITION"
+  
+        export VPC_ID=$(aws ec2 create-vpc --cidr-block '10.0.0.0/16' --query "Vpc.VpcId" --output text)
+        echo "vpc: $VPC_ID"
+        aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
+        aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support
+
+        export SUBNET1_ID=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block '10.0.1.0/24' \
+          --availability-zone "${AWS_REGION}b" \
+          --query "Subnet.SubnetId" --output text)
+        echo "subnet1: $SUBNET1_ID"
+  
+        export SUBNET2_ID=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block '10.0.2.0/24' \
+          --availability-zone "${AWS_REGION}c" \
+          --query "Subnet.SubnetId" --output text)
+        echo "subnet2: $SUBNET2_ID"
+
+        export PRIVATE_SUBNET_ID=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block '10.0.3.0/24' \
+          --availability-zone "${AWS_REGION}c" \
+          --query "Subnet.SubnetId" --output text)
+        echo "private subnet: $PRIVATE_SUBNET_ID"
+
+        export GATEWAY_ID=$(aws ec2 create-internet-gateway --query "InternetGateway.InternetGatewayId" \
+          --output text)
+        echo "gateway: $GATEWAY_ID"
+        aws ec2 attach-internet-gateway --vpc-id "$VPC_ID" --internet-gateway-id "$GATEWAY_ID"
+
+        export ROUTETABLE_ID=$(aws ec2 create-route-table --vpc-id "$VPC_ID" \
+          --query "RouteTable.RouteTableId" --output text)
+        aws ec2 create-route --route-table-id "$ROUTETABLE_ID" --destination-cidr-block '0.0.0.0/0' \
+          --gateway-id "$GATEWAY_ID"
+        echo "gateway: $ROUTETABLE_ID" 
+        aws ec2 associate-route-table  --subnet-id "$SUBNET1_ID" --route-table-id "$ROUTETABLE_ID"
+        aws ec2 associate-route-table  --subnet-id "$SUBNET2_ID" --route-table-id "$ROUTETABLE_ID"
+
+        export SECURITYGROUP_ID=$(aws ec2 describe-security-groups \
+          --filters Name=vpc-id,Values="$VPC_ID" \
+          --query "SecurityGroups[0].GroupId" --output text)
+        echo "security group: $SECURITYGROUP_ID" 
+        aws ec2 authorize-security-group-ingress --group-id "$SECURITYGROUP_ID" \
+          --protocol tcp --port '80' --cidr '0.0.0.0/0'
+  
+        echo "list clusters:"
+        aws ecs list-clusters
+  
+        echo "create cluster:"
+        aws ecs create-cluster --cluster-name "$ECS_CLUSTER"
+ 
+        echo "create service:" 
+        aws ecs create-service --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE"  \
+          --task-definition "${ECS_SERVICE_FAMILY}:${TASK_REVISION}" --desired-count 1 --launch-type "FARGATE" \
+          --scheduling-strategy 'REPLICA' --deployment-controller '{"type": "ECS"}' \
+          --deployment-configuration 'minimumHealthyPercent=100,maximumPercent=200'  \
+          --network-configuration "awsvpcConfiguration={subnets=[$SUBNET1_ID],securityGroups=[$SECURITYGROUP_ID],assignPublicIp=\"ENABLED\"}"
+
+        echo "wait for stable service:"
+        aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+        export PUBLIC_IP=$(aws ec2 describe-network-interfaces --filters "Name=subnet-id,Values=$SUBNET1_ID" \
+          --query 'NetworkInterfaces[0].PrivateIpAddresses[0].Association.PublicIp' --output text)
+        echo "public service ip: $PUBLIC_IP"
+        export CURL=$(curl $PUBLIC_IP) 
+        echo "curl: $CURL"
+        if [[ "$CURL" == *"Hello world!"* ]]
+        then
+          echo "service $ECS_SERVICE sucessfully tested!"
+        else
+          echo "service $ECS_SERVICE ko!"
+          false
+        fi 
+        echo "list tasks for service "$ECS_SERVICE": "
+        aws ecs list-tasks --service "$ECS_SERVICE" --cluster "$ECS_CLUSTER" 
+
+        echo "delete service: "
+        aws ecs delete-service --service "$ECS_SERVICE" --cluster "$ECS_CLUSTER" --force
+        aws ecs wait services-inactive --service "$ECS_SERVICE" --cluster "$ECS_CLUSTER"
+
+        echo "task definitions final cleanup: "
+        aws ecs list-task-definitions
+        for TASK_DEF in $(aws ecs list-task-definitions --query "taskDefinitionArns[]" --output text)
+        do
+          echo "deregister task definition: |$TASK_DEF|"
+          aws ecs deregister-task-definition --task-definition "$TASK_DEF"
+        done
+
+        echo "delete cluster:"
+        aws ecs delete-cluster --cluster "$ECS_CLUSTER"
+        sleep 20s
+
+        echo "delete subnets:"
+        aws ec2 delete-subnet --subnet-id "$SUBNET1_ID"
+        aws ec2 delete-subnet --subnet-id "$SUBNET2_ID"
+        aws ec2 delete-subnet --subnet-id "$PRIVATE_SUBNET_ID"
+
+        echo "delete route table:"
+        aws ec2 delete-route-table --route-table-id "$ROUTETABLE_ID"
+
+        echo "delete gateway:"
+        aws ec2 detach-internet-gateway --internet-gateway-id "$GATEWAY_ID" --vpc-id "$VPC_ID"
+        aws ec2 delete-internet-gateway --internet-gateway-id "$GATEWAY_ID"
+
+        echo "delete vpc:"
+        aws ec2 delete-vpc --vpc-id "$VPC_ID"
+      

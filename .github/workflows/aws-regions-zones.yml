@@ -1,0 +1,63 @@
+name: Regions and zones
+
+on:
+
+  workflow_dispatch:
+    inputs:
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-regions-zones.yml' 
+
+jobs:
+  describe-regions-zones:
+    name: Describe regions & zones
+    runs-on: ubuntu-latest
+
+    steps:
+        
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install aws v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+
+    - name: Describe all regions and check
+      run: |-
+        export DESCRIBE_REGIONS=$(aws ec2 describe-regions)
+        echo "desribe-regions: $DESCRIBE_REGIONS"
+        grep '"RegionName": "eu-north-1"' <<< $DESCRIBE_REGIONS
+        grep '"RegionName": "us-west-1"' <<< $DESCRIBE_REGIONS
+        grep '"RegionName": "ap-southeast-2"' <<< $DESCRIBE_REGIONS
+        
+    - name: Describe availability zones in some region
+      run: |-
+        export DESCRIBE_ZONES=$(aws ec2 describe-availability-zones --region 'eu-north-1')
+        echo "describe-availability-zones: $DESCRIBE_ZONES"
+        grep '"ZoneName": "eu-north-1a"' <<< $DESCRIBE_ZONES
+        grep '"ZoneName": "eu-north-1c"' <<< $DESCRIBE_ZONES
+        
+    - name: Loop on all regions and zones 
+      run: |-
+        export REGIONS=$(aws ec2 describe-regions | jq -r ".Regions[].RegionName")
+
+        for region in $REGIONS; do
+          echo -e "region: $region"
+          aws ec2 describe-availability-zones --region $region
+        done

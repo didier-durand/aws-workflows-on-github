@@ -1,0 +1,101 @@
+name: Deploy EC2 instance
+
+on:
+
+  workflow_dispatch:
+    inputs: 
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-ec2.yml' 
+    
+env:
+   # AMI: amzn2-ami-hvm-2.0.20200722.0-x86_64-gp2
+   EC2_AMI:  ami-07c8bc5c1ce9598c3
+   EC2_INSTANCE_TYPE: t2.micro
+
+jobs:
+  use-EC2-instance:
+    name: Use ec2 instance
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+
+    - name: Describe VPCs, delete current default vpc if needed and create fresh one
+      run: |-
+        export DESCRIBE_VPCS=$(aws ec2 describe-vpcs)
+        echo "describe-vpcs: $DESCRIBE_VPCS"
+        export DEFAULT_VPC=$(echo "$DESCRIBE_VPCS" | jq -r '.Vpcs[] | select(.IsDefault == true).VpcId')
+        echo "default vpc: $DEFAULT_VPC"
+        grep "vpc-" <<< $DEFAULT_VPC && bash sh/delete-default-vpc.sh || true
+        aws ec2 create-default-vpc
+        
+    - name: Describe EC2 instances
+      run: |-
+        aws ec2 describe-instances
+    
+    - name: Run new instance
+      run: |-
+        export RUN_INSTANCES=$(aws ec2 run-instances --count 1 --image-id $EC2_AMI --instance-type $EC2_INSTANCE_TYPE --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=github-$GITHUB_SHA}]")
+        echo "run-instances: $RUN_INSTANCES"
+        export INSTANCE_ID0=$(echo $RUN_INSTANCES | jq -r ".Instances[] | select(.Tags[].Value == \"github-$GITHUB_SHA\").InstanceId")  
+        echo "instance id: $INSTANCE_ID0"
+        echo "::set-env name=INSTANCE_ID::$INSTANCE_ID0"
+           
+    - name: Describe instances to wait for running state
+      run: |-
+        echo "instance id: $INSTANCE_ID"
+        export INSTANCE_STATE="unknown"
+        while [ $INSTANCE_STATE != "running" ]
+        do
+           export DESCRIBE_INSTANCES=$(aws ec2 describe-instances)
+           #echo "describe-instances: $DESCRIBE_INSTANCES"
+           export INSTANCE_STATE=$(echo $DESCRIBE_INSTANCES | jq -r ".Reservations[] | .Instances[] | select(.InstanceId == \"$INSTANCE_ID\").State.Name")
+           echo "instance id: $INSTANCE_ID"
+           echo "instance state: $INSTANCE_STATE - $(date --utc)"
+           sleep 10s
+        done
+        
+    - name: Terminate instance
+      run: |-
+        echo "instance id: $INSTANCE_ID"
+        aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
+        
+    - name: Describe instances to wait for terminated state
+      run: |-
+        echo "instance id: $INSTANCE_ID"
+        export INSTANCE_STATE="unknown"
+        while [ $INSTANCE_STATE != "terminated" ]
+        do
+           export DESCRIBE_INSTANCES=$(aws ec2 describe-instances)
+           #echo "describe-instances: $DESCRIBE_INSTANCES"
+           export INSTANCE_STATE=$(echo $DESCRIBE_INSTANCES | jq -r ".Reservations[] | .Instances[] | select(.InstanceId == \"$INSTANCE_ID\").State.Name")
+           echo "instance id: $INSTANCE_ID"
+           echo "instance state: $INSTANCE_STATE - $(date --utc)"
+           sleep 10s
+        done
+           
+    - name: Delete default AWS VPC
+      run: |-
+        bash sh/delete-default-vpc.sh

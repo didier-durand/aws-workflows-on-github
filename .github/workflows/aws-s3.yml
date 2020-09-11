@@ -1,0 +1,72 @@
+name: Use S3 buckets 
+
+on:
+
+  workflow_dispatch:
+    inputs:
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-s3.yml' 
+    
+env:
+   S3_BUCKET: s3://net.didier-durand.test-workflows-bucket
+
+jobs:
+  use-S3:
+    name: Use s3
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install aws v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+
+    - name: Create S3 bucket
+      run: |-
+        aws s3 rb $S3_BUCKET --force || true
+        aws s3 mb $S3_BUCKET
+        
+    - name: Copy file to bucket
+      run: |-
+        echo "content: $GITHUB_SHA" > "/tmp/file-$GITHUB_SHA.txt"
+        aws s3 cp  "/tmp/file-$GITHUB_SHA.txt" "$S3_BUCKET"
+        
+    - name: List bucket content and check file presence
+      run: |-
+        export LIST_BUCKET=$(aws s3 ls "$S3_BUCKET" --recursive --human-readable)
+        echo "list bucket: $LIST_BUCKET"
+        grep "file-$GITHUB_SHA.txt" <<< $LIST_BUCKET
+        
+        
+    # diff is used to make sure that read content equals original one   
+    - name: Read file from bucket (and diff to validate)
+      run: |-
+        aws s3 cp "$S3_BUCKET/file-$GITHUB_SHA.txt" "/tmp/file-$GITHUB_SHA-read.txt"
+        diff "/tmp/file-$GITHUB_SHA.txt" "/tmp/file-$GITHUB_SHA-read.txt"
+    
+    - name: Delete file from bucket
+      run: |-
+        aws s3 rm "$S3_BUCKET/file-$GITHUB_SHA.txt"
+     
+    - name: Delete S3 bucket
+      run: |-
+        aws s3 rb $S3_BUCKET

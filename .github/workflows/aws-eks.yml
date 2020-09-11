@@ -1,0 +1,126 @@
+name: Create EKS cluster 
+
+on: 
+
+  workflow_dispatch:
+    inputs:
+  
+  push:
+    #protection to avoid triggering when other workflow is modified
+    paths: 
+    - '!.github/workflows/**'
+    - '.github/workflows/aws-eks.yml' 
+
+env:
+  # action = 'create' or 'delete' or 'create-delete'
+  EKS_ACTION: create-delete
+  EKS_CLUSTER: test-eks-cluster
+  EKS_NODES: test-eks-nodes
+  EKS_CONFIG: cluster-config.yaml
+  EKS_SERVICE: tutum-hello-world
+  
+jobs:
+  create-kubernetes-cluster:
+    name: Create Kubernetes cluster
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Install v2 and check aws CLI version
+      # Github currently (Aug 2020) runs on aws CLI v1
+      run: |-
+        curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        sudo ./aws/install
+        export AWS_VERSION=$(aws --version)
+        echo "AWS_VERSION: $AWS_VERSION)"
+        grep -q "aws-cli/2." <<< $AWS_VERSION
+        # add install
+        curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+        sudo mv /tmp/eksctl /usr/local/bin
+        echo "EKSCTL_VERSION: $(eksctl version)"
+        
+    - name: Create config
+      run: |-
+        cp "eks/$EKS_CONFIG" "./$EKS_CONFIG"
+        echo " "
+        ls -l "eks/$EKS_CONFIG"
+        ls -l "./$EKS_CONFIG"
+        echo -e "\nconfig before:"
+        cat "./$EKS_CONFIG"
+        sed -i "s/<<EKS_NODES>>/$EKS_NODES/" "./$EKS_CONFIG"
+        sed -i "s/<<EKS_CLUSTER>>/$EKS_CLUSTER/" "./$EKS_CONFIG"
+        sed -i "s/<<AWS_REGION>>/${{ secrets.AWS_REGION }}/" "./$EKS_CONFIG"
+        echo -e "\nconfig after:"
+        cat "./$EKS_CONFIG"
+    
+    - name: Create EKS cluster
+      run: |-
+        if [[ $EKS_ACTION == *"create"* ]]
+        then
+          eksctl delete cluster -f "./$EKS_CONFIG" || true
+          eksctl create cluster -f "./$EKS_CONFIG"
+          echo "update cluster logging:" 
+          eksctl utils update-cluster-logging --enable-types all --approve --cluster $EKS_CLUSTER --region ${{ secrets.AWS_REGION }}  
+          echo "describe cluster stacks:" 
+          eksctl utils describe-stacks --cluster $EKS_CLUSTER --region ${{ secrets.AWS_REGION }}
+          echo "describe cluster:"
+          aws eks describe-cluster --name $EKS_CLUSTER
+          echo "get nodegroup:"
+          eksctl get nodegroup --cluster=$EKS_CLUSTER
+        fi
+     
+    - name: Generate kubeconfig for kubectl
+      run: |-
+        aws eks update-kubeconfig --name $EKS_CLUSTER --region ${{ secrets.AWS_REGION }}
+        kubectl get services --all-namespaces
+        
+    - name: Deploy to service to EKS cluster
+      run: |-
+        # grant auths for access (|| true to avoid failure when repeated)
+        echo "create cluster role binding for anonymous"
+        kubectl create clusterrolebinding anonymous-cluster-admin-binding --clusterrole=cluster-admin --user=system:anonymous || true
+
+        # deploy on cluster
+        echo "apply $EKS_SERVICE.yaml: "
+        kubectl delete -f "kubernetes/$EKS_SERVICE.yaml" || true
+        kubectl apply -f "kubernetes/$EKS_SERVICE.yaml"
+
+        # get service DNS name
+        kubectl get svc "$EKS_SERVICE"
+
+        #wait until DNS name gets published
+        while [[ $(TERM=dumb kubectl get svc "$EKS_SERVICE" | grep "$EKS_SERVICE" -m 1 | awk '{ print $4 }') == *'<pending>'* ]]
+        do
+          echo "sleep 5s to get dns"
+          sleep 5s
+        done
+        export EKS_SERVICE_DNS=$(TERM=dumb kubectl get svc "$EKS_SERVICE" | grep "$EKS_SERVICE" -m 1 | awk '{ print $4 }') 
+
+        #wait until name visible on Internet DNS
+        echo "eks service dns: |$EKS_SERVICE_DNS|"
+        while [[ $(nslookup "$EKS_SERVICE_DNS") == *'NXDOMAIN'* ]]
+        do
+          echo "sleep 5s for nslookup |$EKS_SERVICE_DNS|"
+          sleep 5s
+        done
+
+        # service can be called
+        curl --insecure "$EKS_SERVICE_DNS" | grep "$EKS_SERVICE"
+        echo "service $EKS_SERVICE sucessfully tested!"
+        
+    - name: Delete EKS cluster
+      run: |-
+        if [[ $EKS_ACTION == *"delete"* ]]
+        then
+          eksctl delete cluster -f "./$EKS_CONFIG"
+        fi
