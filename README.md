@@ -13,6 +13,8 @@
 ![workflow badge](https://github.com/didier-durand/aws-workflows-on-github/workflows/Use%20S3%20buckets/badge.svg)
 ![workflow badge](https://github.com/didier-durand/aws-workflows-on-github/workflows/Get%20services%20descriptions/badge.svg)
 
+[If you are more interested in similar scripts for Google Cloud Platform, see our other project with workflows for [GCP](https://github.com/didier-durand/gcp-workflows-on-github)]
+
 This repository contains [Github Actions / Workflows](https://github.com/features/actions) executing scripts that are frequently needed in the implementation of applications hosted on the cloud with [Amazon Web Services (AWS)](https://aws.amazon.com/). These scripts are based on CLI commands of the [AWS SDK](https://aws.amazon.com/cli/) to allow complete automation, basis of best DevOps practices. To be properly triggered and executed on Github CI/CD environment, they need to be located in [/.github directory](https://github.com/didier-durand/gcloud-tests/tree/master/.github/workflows).
 
 All details about used commands can be found in [AWS SDK CLI Reference](https://aws.amazon.com/cli/). On purpose, those commands are implemented with minimum set of options and parameters to keep them as neutral as possible for reuse in other projects.
